@@ -1,7 +1,7 @@
 {
   "id": "./",
-  "name": "セレンディピティTube",
-  "short_name": "セレンディピティ",
+  "name": "はてブ動画",
+  "short_name": "はてブ動画",
   "lang": "ja",
   "start_url": "./",
   "scope": "./",

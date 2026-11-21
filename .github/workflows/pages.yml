@@ -1,0 +1,83 @@
+name: Collect and deploy Pages
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [daily, seed]
+        default: daily
+      max_requests:
+        description: Maximum HTTP requests (empty for no limit)
+        type: string
+        default: ''
+
+concurrency:
+  group: pages-production
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    permissions:
+      contents: write
+    outputs:
+      revision: ${{ steps.commit.outputs.revision }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Collect data
+        env:
+          MODE: ${{ inputs.mode || 'daily' }}
+          MAX_REQUESTS: ${{ inputs.max_requests }}
+        run: |
+          args=(--mode "$MODE" --time-budget-min 300)
+          if [[ -n "$MAX_REQUESTS" ]]; then args+=(--max-requests "$MAX_REQUESTS"); fi
+          node scripts/collect.mjs "${args[@]}"
+      - name: Commit data
+        id: commit
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data/
+          if ! git diff --cached --quiet; then
+            git commit -m "data: update $(TZ=Asia/Tokyo date +%F)"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: collect
+    if: always() && (needs.collect.result == 'success' || needs.collect.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.collect.outputs.revision || github.sha }}
+      - uses: actions/configure-pages@v5
+      - name: Stage public files
+        run: |
+          mkdir "$RUNNER_TEMP/public"
+          cp -r .nojekyll index.html style.css app.js player.js js data sw.js manifest.webmanifest icon.svg icon-192.png icon-512.png "$RUNNER_TEMP/public/"
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/public
+      - uses: actions/deploy-pages@v4
+        id: deploy

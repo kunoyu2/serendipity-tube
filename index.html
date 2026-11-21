@@ -3,18 +3,55 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>はてブ動画</title>
+  <meta name="description" content="はてなブックマークで話題になったYouTube動画">
   <meta name="theme-color" content="#101117">
-  <meta name="description" content="高評価、登録チャンネル、共通のコメントを手がかりに動画を発見。">
-  <title>セレンディピティTube</title>
-  <link rel="icon" href="./icon.svg" type="image/svg+xml">
-  <link rel="apple-touch-icon" href="./icon-192.png">
-  <link rel="manifest" href="./manifest.webmanifest">
-  <link rel="stylesheet" href="./style.css">
-  <script type="module" src="./app.js"></script>
+  <meta property="og:type" content="website">
+  <meta property="og:locale" content="ja_JP">
+  <meta property="og:title" content="はてブ動画">
+  <meta property="og:description" content="はてなブックマークで話題になったYouTube動画">
+  <meta property="og:url" content="https://kunoyu2.github.io/serendipity-tube/">
+  <meta property="og:image" content="https://kunoyu2.github.io/serendipity-tube/icon-512.png">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
 </head>
 <body>
-  <div id="app"></div>
-  <div id="notice" role="status" hidden></div>
-  <noscript>セレンディピティTube を使うには JavaScript を有効にしてください。</noscript>
+  <header class="masthead shell">
+    <div class="brand"><img src="icon.svg" alt="" width="48" height="48"><h1>はてブ動画</h1></div>
+    <p>はてなブックマークで話題になったYouTube動画</p>
+    <p id="meta" class="muted"></p>
+  </header>
+  <div class="toolbar">
+    <div class="shell">
+      <div class="filters" aria-label="動画の絞り込み">
+        <label>並び順<select id="sort"><option value="count">ブックマーク数順</option><option value="new">新着順</option><option value="random">ランダム（ひらめき）</option></select></label>
+        <label>期間<select id="period"><option value="all">すべて</option><option value="week">1週間</option><option value="month">1か月</option><option value="quarter">3か月</option><option value="year">1年</option></select></label>
+        <label>ブクマ数<select id="min"><option value="3">3+</option><option value="10">10+</option><option value="30">30+</option><option value="100">100+</option><option value="300">300+</option></select></label>
+      </div>
+      <div class="actions tools">
+        <input id="query" type="search" aria-label="動画を検索" placeholder="タイトル・チャンネル・コメントを検索">
+        <button class="button primary" id="tv" disabled>TVモード</button>
+        <button class="button" id="settings">設定</button>
+      </div>
+      <div class="actions">
+        <label class="check"><input id="showWatched" type="checkbox">視聴済みも表示</label>
+        <button class="button" id="shuffle" hidden>再シャッフル</button>
+        <button class="button" id="channel" hidden></button>
+      </div>
+    </div>
+  </div>
+  <main class="shell">
+    <p id="status" role="status" tabindex="-1">動画を読み込み中…</p>
+    <button class="button" id="retry" hidden>再読み込み</button>
+    <noscript>動画一覧の表示にはJavaScriptが必要です。</noscript>
+    <div class="cards" id="cards" aria-busy="true">
+      <div class="skeleton" aria-hidden="true"></div><div class="skeleton" aria-hidden="true"></div><div class="skeleton" aria-hidden="true"></div>
+    </div>
+    <nav class="pagination actions" id="pages" aria-label="ページ切り替え" hidden>
+      <button class="button" id="prevPage">前のページ</button><span id="pageNumber"></span><button class="button" id="nextPage">次のページ</button>
+    </nav>
+  </main>
 </body>
 </html>

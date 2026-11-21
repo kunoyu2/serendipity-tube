@@ -1,4 +1,5 @@
-import {element as h, button, why, external} from './ui/dom.js';
+import {element as h, button, bookmark, commentList, external} from './js/dom.js';
+import {watchUrl} from './js/video.js';
 
 let library;
 function iframeAPI() {
@@ -22,12 +23,12 @@ function iframeAPI() {
   return library;
 }
 
-export function openPlayer({video, initialFeed = 'discovery', getFeed, hide, watched, demo}) {
-  const tv = !video;
+export function openPlayer({videos, tv = false, hide, watched, comments}) {
+  let queue = [...videos];
   let player;
   let generation = 0;
   let wakeLock;
-  let queue = video ? [video] : [];
+  let watchTimer;
   let index = 0;
   let muted = false;
   let playing = false;
@@ -35,92 +36,83 @@ export function openPlayer({video, initialFeed = 'discovery', getFeed, hide, wat
   const stage = h('div', {class: 'stage'});
   const info = h('div', {class: 'player-info'});
   const status = h('p', {class: 'player-status', role: 'status'});
-  const sound = button('音声をオン', () => {
+  const sound = button('タップで音を出す', () => {
     muted = false;
     player?.unMute();
     player?.playVideo();
     sound.hidden = true;
   });
   sound.hidden = true;
-  const play = button('再生', () => playing ? player?.pauseVideo() : player?.playVideo());
-  const selector = h('select', {'aria-label': '再生フィード', onchange: rebuild},
-    h('option', {value: 'discovery'}, '発見'), h('option', {value: 'subscribed'}, '登録'),
-    h('option', {value: 'mix'}, 'ミックス'));
-  selector.value = initialFeed;
-  const shuffle = h('input', {type: 'checkbox', onchange: rebuild});
-  const hideCurrent = button(tv ? '非表示にして次へ' : '非表示', async () => {
-    const current = queue[index];
-    if (!current) return;
-    hideCurrent.disabled = true;
-    try {
-      await hide(current);
-      if (!dialog.open) return;
-      if (!tv) return dialog.close();
-      const active = queue[index];
-      queue = queue.filter(item => item.id !== current.id);
-      if (active === current) {
-        index %= queue.length || 1;
-        load();
-      } else index = Math.max(0, queue.indexOf(active));
-    } catch {
-      status.textContent = '非表示を保存できませんでした。';
-    } finally {
-      hideCurrent.disabled = false;
-    }
-  });
-  const controls = h('div', {class: 'actions player-controls'}, play,
-    tv && button('前へ', () => move(-1)), tv && button('次へ', () => move(1)),
-    tv && button('スキップ', () => move(1)), hideCurrent, sound);
-  const dialog = h('dialog', {class: tv ? 'player tv' : 'player', 'aria-label': tv ? 'TV モード' : '動画プレーヤー'},
-    h('div', {class: 'player-bar'}, h('strong', {}, tv ? 'TV モード' : '動画'), button('閉じる ×', () => dialog.close())),
-    tv && h('div', {class: 'actions tv-options'}, selector, h('label', {}, shuffle, ' シャッフル')),
-    stage, info, status, controls);
-
-  function rebuild() {
-    queue = [...getFeed(selector.value)];
-    if (shuffle.checked) {
-      for (let i = queue.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [queue[i], queue[j]] = [queue[j], queue[i]];
-      }
-    }
-    index = 0;
-    load();
-  }
-  function move(offset, automatic = false) {
-    if (!queue.length) return;
-    if (automatic && index >= queue.length - 1) {
-      status.textContent = 'このフィードの再生が終了しました。';
+  const play = button('再生', togglePlay);
+  const prev = button('前へ', () => move(-1));
+  const next = button('次へ', () => move(1));
+  const hideCurrent = button(tv ? '非表示して次へ' : '非表示', () => {
+    if (!queue[index]) return;
+    hide(queue[index]);
+    queue.splice(index, 1);
+    if (!tv) {
+      dialog.close();
       return;
     }
-    index = (index + offset + queue.length) % queue.length;
+    if (index >= queue.length) index = 0;
     load();
+  });
+  const dialog = h('dialog', {class: tv ? 'player tv' : 'player', 'aria-label': tv ? 'TVモード' : '動画プレーヤー'},
+    h('div', {class: 'player-bar'}, h('strong', {}, tv ? 'TVモード' : '動画'), button('閉じる ×', () => dialog.close())),
+    stage, h('div', {class: 'actions player-controls'}, tv && prev, play, next, hideCurrent, sound), status, info);
+
+  function togglePlay() {
+    if (!player && queue[index]) {
+      load();
+      return;
+    }
+    if (playing) player?.pauseVideo();
+    else player?.playVideo();
   }
-  async function load() {
-    const request = ++generation;
+  function move(offset) {
+    const target = index + offset;
+    if (target < 0 || target >= queue.length) return false;
+    index = target;
+    load();
+    return true;
+  }
+  function clearPlayer() {
+    clearTimeout(watchTimer);
     player?.destroy();
     player = null;
     playing = false;
+    sound.hidden = true;
+    stage.replaceChildren();
+  }
+  function finish(message) {
+    generation++;
+    clearPlayer();
+    play.textContent = 'もう一度再生';
+    status.textContent = message;
+  }
+  async function load() {
+    const request = ++generation;
+    clearPlayer();
     blocked = false;
     play.textContent = '再生';
-    stage.replaceChildren();
     info.replaceChildren();
     status.textContent = '';
-    sound.hidden = true;
     const current = queue[index];
-    play.disabled = !current || demo;
+    play.disabled = true;
     hideCurrent.disabled = !current;
+    prev.disabled = index === 0;
+    next.disabled = index >= queue.length - 1;
     if (!current) {
       status.textContent = '再生できる動画がありません。';
       return;
     }
-    info.append(h('h2', {}, current.title), h('p', {class: 'channel'}, current.channel), h('p', {class: 'why'}, why(current)));
-    if (demo) {
-      stage.append(h('div', {class: 'thumb demo-stage', 'data-art': current.art}, h('span', {class: 'art-mark'})));
-      status.textContent = 'デモ動画のプレビューです。';
-      return;
-    }
-    info.append(external('YouTube で開く ↗', 'https://www.youtube.com/watch?v=' + encodeURIComponent(current.id)));
+    info.append(h('h2', {}, current.t), h('p', {class: 'channel'}, current.c),
+      h('div', {class: 'actions'}, bookmark(current), external('YouTubeで開く ↗', watchUrl(current.id))));
+    comments(current).then(items => {
+      const list = commentList(items);
+      if (request === generation && list) info.append(list);
+    }).catch(() => {});
+    status.textContent = 'プレーヤーを読み込み中…';
     const mount = h('div');
     stage.append(mount);
     try {
@@ -131,7 +123,9 @@ export function openPlayer({video, initialFeed = 'discovery', getFeed, hide, wat
         playerVars: {rel: 0, playsinline: 1, origin: location.origin, hl: 'ja'},
         events: {
           onReady({target}) {
-            if (request !== generation) return;
+            if (request !== generation || !dialog.open) return;
+            play.disabled = false;
+            status.textContent = '';
             if (muted) {
               target.mute();
               sound.hidden = false;
@@ -139,7 +133,7 @@ export function openPlayer({video, initialFeed = 'discovery', getFeed, hide, wat
             target.playVideo();
           },
           onAutoplayBlocked({target}) {
-            if (request !== generation) return;
+            if (request !== generation || !dialog.open) return;
             sound.hidden = false;
             if (blocked) {
               status.textContent = '再生ボタンを押してください。';
@@ -150,27 +144,42 @@ export function openPlayer({video, initialFeed = 'discovery', getFeed, hide, wat
             target.mute();
             target.playVideo();
           },
-          onStateChange({data}) {
-            if (request !== generation) return;
+          onStateChange({data, target}) {
+            if (request !== generation || !dialog.open) return;
+            clearTimeout(watchTimer);
             playing = data === YT.PlayerState.PLAYING;
             play.textContent = playing ? '一時停止' : '再生';
             if (playing) {
               status.textContent = '';
-              watched(current).catch(() => { status.textContent = '視聴履歴を保存できませんでした。'; });
+              watchTimer = setTimeout(() => {
+                if (request === generation && dialog.open && target.getPlayerState() === YT.PlayerState.PLAYING) watched(current);
+              }, 4000);
             }
-            if (data === YT.PlayerState.ENDED && tv) move(1, true);
+            if (data === YT.PlayerState.ENDED && !(tv && move(1))) finish('再生が終了しました。');
           },
           onError({data}) {
-            if (request !== generation) return;
-            if (tv && index < queue.length - 1) return move(1, true);
-            status.textContent = [101, 150].includes(data) ? 'この動画は埋め込み再生できません。' : 'この動画を再生できませんでした。';
+            if (request !== generation || !dialog.open) return;
+            if (tv && [2, 5, 100, 101, 150].includes(data) && move(1)) return;
+            finish('この動画を再生できませんでした。');
+            play.disabled = false;
           }
         }
       });
     } catch (error) {
-      if (request === generation) status.textContent = error.message;
+      if (request === generation) {
+        status.textContent = error.message;
+        play.disabled = false;
+      }
     }
   }
+  dialog.addEventListener('keydown', event => {
+    if (!tv || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.key === 'ArrowLeft') move(-1);
+    else if (event.key === 'ArrowRight') move(1);
+    else if (event.key.toLowerCase() === 'k' || (event.key === ' ' && event.target === dialog)) togglePlay();
+    else return;
+    event.preventDefault();
+  });
   async function keepAwake() {
     if (!tv || !dialog.open || document.hidden || !navigator.wakeLock || (wakeLock && !wakeLock.released)) return;
     try {
@@ -181,7 +190,7 @@ export function openPlayer({video, initialFeed = 'discovery', getFeed, hide, wat
   }
   dialog.addEventListener('close', () => {
     generation++;
-    player?.destroy();
+    clearPlayer();
     wakeLock?.release().catch(() => {});
     document.removeEventListener('visibilitychange', keepAwake);
     dialog.remove();
@@ -190,7 +199,6 @@ export function openPlayer({video, initialFeed = 'discovery', getFeed, hide, wat
   dialog.showModal();
   document.addEventListener('visibilitychange', keepAwake);
   keepAwake();
-  if (tv) rebuild();
-  else load();
+  load();
   return dialog;
 }

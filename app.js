@@ -1,322 +1,219 @@
-import {GOOGLE_CLIENT_ID} from './config.js';
-import {token, signIn, signOut, prepareSignIn} from './auth.js';
-import {quotaDay} from './api.js';
-import {storage} from './db.js';
-import {defaults, refresh, channelUploads} from './refresh.js';
-import {rankVideos} from './rank.js';
-import {demoData} from './demo.js';
 import {openPlayer} from './player.js';
-import {element as h, button} from './ui/dom.js';
-import {setup} from './ui/setup.js';
-import {feed} from './ui/feed.js';
-import {peopleView, timeline} from './ui/people.js';
-import {settingsView} from './ui/settings.js';
+import {bookmark, button, commentList, element as h, external} from './js/dom.js';
+import {channelKey, defaults, filterVideos, localSets, serializeSets} from './js/catalog.js';
+import {commentShard, hatenaUrl} from './js/video.js';
+import {openSettings} from './js/settings.js';
 
-const root = document.querySelector('#app');
-const notice = document.querySelector('#notice');
-const tabs = [
-  ['discovery', '発見', 'compass'], ['subscribed', '登録', 'stack'],
-  ['people', '人', 'people'], ['settings', '設定', 'settings']
-];
-const paths = {
-  compass: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20ZM16 8l-2.5 5.5L8 16l2.5-5.5L16 8Z',
-  stack: 'M5 3h14M3 7h18M3 11h18v10H3zM10 14l5 2-5 2z',
-  people: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2m20 0v-2a4 4 0 0 0-3-4M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0Zm4-4a4 4 0 0 1 0 8',
-  settings: 'M4 7h16M4 17h16M8 4v6m8 4v6',
-  tv: 'M3 7h18v13H3zM8 2l4 5 4-5m-6 9 5 2.5-5 2.5z'
-};
-function icon(name) {
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  const path = document.createElementNS(svg.namespaceURI, 'path');
-  svg.setAttribute('viewBox', '0 0 24 24');
-  svg.setAttribute('aria-hidden', 'true');
-  path.setAttribute('d', paths[name]);
-  svg.append(path);
-  return svg;
+const get = id => document.getElementById(id);
+const pageSize = 24;
+const stateKey = 'hatebu-video-state';
+const controlKey = 'hatebu-video-controls';
+
+function readStorage(key, storage = 'localStorage') {
+  try { return JSON.parse(window[storage].getItem(key)); } catch { return null; }
 }
-
-const initial = {
-  candidates: [], subscribed: [], people: [], timelineVideos: {}, discovered: [], likes: [],
-  subscriptions: [], comments: {}, settings: defaults, hidden: [], watched: [], quota: {}, refresh: {}
-};
-let demo = false;
-let db = storage();
-let state = {...initial};
-let tab = 'discovery';
-let person;
-let running;
-let busy = false;
-let messageTimer;
-let historyWrites = Promise.resolve();
-
-function message(text) {
-  clearTimeout(messageTimer);
-  notice.textContent = text;
-  notice.hidden = !text;
-  if (text) messageTimer = setTimeout(() => { notice.hidden = true; }, 8500);
+function store(key, value, storage = 'localStorage') {
+  try { window[storage].setItem(key, JSON.stringify(value)); } catch {}
 }
-
-async function loadState() {
-  const entries = await Promise.all(Object.entries(initial).map(async ([key, value]) => [key, await db.get(key, value)]));
-  state = Object.fromEntries(entries);
+function newSeed() {
+  return crypto.getRandomValues(new Uint32Array(1))[0];
 }
+let sets = localSets(readStorage(stateKey));
+let seed = readStorage('hatebu-video-seed', 'sessionStorage') ?? newSeed();
+store('hatebu-video-seed', seed, 'sessionStorage');
+const controls = {...defaults, ...readStorage(controlKey)};
+let catalog = [];
+let filtered = [];
+let page = 0;
+let loaded = false;
+let generation = 0;
+let searchDelay;
+const shards = new Map();
+const loadedShards = new Map();
 
-function guarded(action) {
-  return async (...args) => {
-    try { return await action(...args); }
-    catch (error) { message(error.message || '処理を完了できませんでした。'); }
-  };
+async function fetchJson(path) {
+  const response = await fetch('./data/' + path, {cache: 'no-cache'});
+  if (!response.ok) throw new Error('HTTP ' + response.status);
+  return response.json();
 }
-
-async function enterDemo() {
-  demo = true;
-  db = storage('demo');
-  await loadState();
-  Object.assign(state, demoData());
-  tab = 'discovery';
-  render();
-}
-
-async function login() {
-  if (busy) return;
-  busy = true;
-  try {
-    await signIn();
-    demo = false;
-    db = storage();
-    await loadState();
-    tab = 'discovery';
-  } finally {
-    busy = false;
-    render();
+function getShard(key) {
+  if (!shards.has(key)) {
+    shards.set(key, fetchJson('comments/' + key + '.json').then(data => {
+      loadedShards.set(key, data);
+      return data;
+    }).catch(error => {
+      shards.delete(key);
+      throw error;
+    }));
   }
+  return shards.get(key);
+}
+async function comments(video) {
+  return video.k ?? (video.s ? (await getShard(commentShard(video.id)))[video.id] ?? [] : []);
 }
 
-function visible(video) {
-  return !state.hidden.includes(video.id) && (state.settings.showWatched || !state.watched.includes(video.id));
+function saveSets() {
+  store(stateKey, serializeSets(sets));
+  refresh(false);
 }
-
-function getFeed(key) {
-  const own = new Set(state.subscriptions.map(channel => channel.id));
-  const subscribed = state.subscribed.filter(visible);
-  const discovery = rankVideos(state.candidates.filter(video => visible(video) && !own.has(video.channelId)));
-  return key === 'subscribed' ? subscribed : key === 'mix' ? [...new Map([...discovery, ...subscribed].map(video => [video.id, video])).values()] : discovery;
+function hide(video) {
+  sets.hidden.add(video.id);
+  saveSets();
 }
-
-function addHistory(key, id) {
-  const target = db;
-  const operation = historyWrites.then(async () => {
-    const previous = await target.get(key, []);
-    if (previous.includes(id)) return;
-    const next = [...previous, id];
-    await target.set(key, next);
-    if (target === db) state[key] = next;
-  });
-  historyWrites = operation.catch(() => {});
-  return operation;
+function play(videos, tv = false) {
+  openPlayer({videos, tv, hide, comments, watched(video) {
+    if (sets.watched.has(video.id)) return;
+    sets.watched.add(video.id);
+    saveSets();
+  }});
 }
-
-function play(video) {
-  const dialog = openPlayer({video, initialFeed: tab === 'subscribed' ? tab : 'discovery', getFeed,
-    hide: item => addHistory('hidden', item.id), watched: item => addHistory('watched', item.id), demo});
-  dialog.addEventListener('close', render, {once: true});
+function setChannel(key) {
+  controls.channel = key;
+  store(controlKey, controls);
+  refresh();
 }
-const actions = {
-  open: play, visible,
-  hide: guarded(async (video, card) => {
-    await addHistory('hidden', video.id);
-    card.remove();
-    message('動画を非表示にしました。');
-  })
-};
-
-async function update() {
-  if (running || busy || demo) return;
-  if (!token()) return login();
-  running = {controller: new AbortController(), step: '更新を開始', count: 0, units: 0};
-  const current = running;
-  render();
-  try {
-    await storage('demo').clear();
-    await refresh(db, state.settings, current.controller.signal, progress => {
-      Object.assign(current, progress);
-      paintProgress();
-    });
-    message('更新が完了しました。');
-  } catch (error) {
-    message(current.controller.signal.aborted ? '更新を中止しました。取得済みのデータは保存されています。' : error.message);
-  } finally {
-    running = null;
-    try { await loadState(); }
-    finally { render(); }
+function card(video, index) {
+  const open = () => play(filtered.slice(index));
+  const channel = channelKey(video);
+  const title = h('h2', {}, button(video.t, open, 'video-title'));
+  const thumb = h('button', {class: 'card-open thumb', type: 'button', 'aria-label': video.t + 'を再生', onclick: open},
+    h('img', {src: 'https://i.ytimg.com/vi/' + video.id + '/mqdefault.jpg', alt: '', loading: 'lazy', decoding: 'async', width: 320, height: 180}),
+    h('span', {class: 'play-icon', 'aria-hidden': 'true'}, '▶'));
+  const detail = h('div', {class: 'card-body'}, title,
+    channel && button(video.c || 'チャンネル', () => setChannel(channel), 'channel channel-link'),
+    h('div', {class: 'actions card-meta'}, bookmark(video), video.d && h('time', {datetime: video.d}, video.d.slice(0, 10))));
+  const article = h('article', {class: 'card'}, thumb, detail,
+    h('div', {class: 'card-footer actions'}, external('はてブで見る ↗', hatenaUrl(video.id)),
+      button('非表示', () => hide(video), 'button subtle'),
+      channel && button('このチャンネルを非表示', () => {
+        sets.hiddenChannels.add(channel);
+        if (controls.channel === channel) setChannel('');
+        saveSets();
+      }, 'button subtle')));
+  if (video.s || video.k?.length) {
+    const load = () => comments(video).then(items => {
+      const list = commentList(items);
+      if (list) detail.append(list);
+    }).catch(() => {});
+    if (observer) {
+      onVisible.set(article, load);
+      observer.observe(article);
+    } else load();
   }
+  return article;
 }
 
-function paintProgress() {
-  const label = document.querySelector('#progress-label');
-  if (label && running) label.textContent = `${running.step} ・ ${running.count}件 ・ ${running.units}ユニット（推定）`;
-}
-
-async function uploads(channel, trigger) {
-  if (busy || running) return message('更新が終わってからお試しください。');
-  let content = trigger.closest('.upload-row').nextElementSibling;
-  if (content?.classList.contains('upload-results')) {
-    content.hidden = !content.hidden;
-    return;
+const onVisible = new WeakMap();
+const observer = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+    observer.unobserve(entry.target);
+    onVisible.get(entry.target)?.();
   }
-  if (!demo && !token()) return login();
-  busy = true;
-  trigger.disabled = true;
-  try {
-    const items = demo ? Object.values(state.timelineVideos).filter(video => video.channelId === channel.id) : await channelUploads(db, channel.id);
-    content = h('div', {class: 'upload-results'}, feed(items.filter(visible), actions));
-    trigger.closest('.upload-row').after(content);
-    if (!demo) state.quota = await db.get('quota', {});
-  } finally {
-    busy = false;
-    trigger.disabled = false;
-    if (!demo && !token()) render();
-  }
-}
+}, {rootMargin: '240px'}) : null;
 
-function exportState() {
-  const url = URL.createObjectURL(new Blob([JSON.stringify({version: 1, demo, state}, null, 2)], {type: 'application/json'}));
-  h('a', {href: url, download: 'serendipity-tube' + (demo ? '-demo' : '') + '.json'}).click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function validateBackup(backup) {
-  if (backup?.version !== 1 || backup.demo !== demo || !backup.state) return false;
-  const data = backup.state;
-  const videoId = demo ? /^sample-\d+$/ : /^[\w-]{11}$/;
-  const validVideo = item => item && typeof item.title === 'string' && typeof item.channel === 'string' &&
-    typeof item.channelId === 'string' && typeof item.published === 'string' && videoId.test(item.id) &&
-    Number.isFinite(item.duration) && item.duration > 180 && Number.isFinite(item.views) &&
-    Array.isArray(item.sources) && item.sources.every(source => source && typeof source.type === 'string') &&
-    Boolean(item.demo) === demo && !/\bshorts\b/i.test(item.title);
-  const validChannel = item => item && typeof item.id === 'string' && typeof item.title === 'string';
-  return ['candidates', 'subscribed', 'likes'].every(key => Array.isArray(data[key]) && data[key].every(validVideo)) &&
-    data.timelineVideos && Object.entries(data.timelineVideos).every(([id, item]) => validVideo(item) && id === item.id) &&
-    ['hidden', 'watched'].every(key => Array.isArray(data[key]) && data[key].every(id => typeof id === 'string' && videoId.test(id))) &&
-    Array.isArray(data.subscriptions) && data.subscriptions.every(validChannel) &&
-    Array.isArray(data.people) && data.people.every(item => item && typeof item.id === 'string' && typeof item.name === 'string' &&
-      (item.subscriptions === null || Array.isArray(item.subscriptions) && item.subscriptions.every(validChannel)) &&
-      Array.isArray(item.playlists) && item.playlists.every(list => list && typeof list.title === 'string' && Array.isArray(list.videoIds))) &&
-    data.settings && typeof data.settings.showWatched === 'boolean' &&
-    Number.isInteger(data.settings.commentCap) && data.settings.commentCap >= 1 && data.settings.commentCap <= 200 &&
-    Number.isInteger(data.settings.peopleCap) && data.settings.peopleCap >= 1 && data.settings.peopleCap <= 50 &&
-    data.quota && typeof data.quota === 'object' && data.refresh && typeof data.refresh === 'object';
-}
-
-function importState() {
-  if (running || busy) return message('処理が終わってからお試しください。');
-  const target = db;
-  const input = h('input', {type: 'file', accept: '.json,application/json', onchange: guarded(async () => {
-    if (!input.files[0] || target !== db || running || busy) return;
-    const backup = JSON.parse(await input.files[0].text());
-    if (target !== db || running || busy) return;
-    if (!validateBackup(backup)) return message('この画面に対応するバックアップを選んでください。');
-    if (!confirm('保存済みのデータを、このファイルで置き換えますか？')) return;
-    busy = true;
-    try {
-      await historyWrites;
-      const values = Object.fromEntries(Object.keys(initial).map(key => [key, backup.state[key] ?? initial[key]]));
-      if (state.quota.day === quotaDay() && (values.quota.day !== state.quota.day || state.quota.units > values.quota.units)) values.quota = state.quota;
-      await db.replace(values);
-      state = values;
-      message('バックアップを読み込みました。');
-      render();
-    } finally { busy = false; }
-  })});
-  input.click();
-}
-
-function settings() {
-  return settingsView({...state, quota: state.quota.day === quotaDay() ? state.quota.units : 0}, {
-    demo, export: exportState, import: importState,
-    setting: guarded(async (key, value) => {
-      const next = {...state.settings, [key]: value};
-      state.settings = next;
-      await db.set('settings', next);
-    }),
-    clear: guarded(async key => {
-      if (!confirm(key === 'hidden' ? '非表示の履歴をすべて消去しますか？' : '視聴済みの履歴をすべて消去しますか？')) return;
-      const target = db;
-      const operation = historyWrites.then(() => target.set(key, []));
-      historyWrites = operation.catch(() => {});
-      await operation;
-      if (target === db) {
-        state[key] = [];
-        render();
-      }
-    }),
-    exit: () => {
-      if (running || busy) return message('処理が終わってからお試しください。');
-      if (!demo) signOut();
-      demo = false;
-      db = storage();
-      tab = 'discovery';
-      person = null;
-      render();
-    }
-  });
-}
-
-function selectTab(key) {
-  tab = key;
-  person = null;
-  render();
-  window.scrollTo(0, 0);
-}
 function render() {
-  const active = demo || token();
-  const brand = h('div', {class: 'brand'}, h('img', {src: './icon.svg', alt: '', width: 36, height: 36}), h('span', {}, 'セレンディピティTube'));
-  const header = h('header', {class: 'topbar'}, h('div', {class: 'top-inner'}, brand,
-    demo ? h('span', {class: 'demo-label'}, 'デモ') : active ? button('↻ 更新', guarded(update)) : null));
-  if (!active && !running) {
-    root.replaceChildren(header, h('main', {class: 'shell'}, setup(Boolean(GOOGLE_CLIENT_ID), guarded(login), guarded(enterDemo))));
-    return;
-  }
-  const progress = running && h('section', {class: 'panel progress'}, h('progress', {'aria-label': '更新中'}),
-    h('div', {id: 'progress-label', role: 'status'}), button('中止', () => running.controller.abort()));
-  const heading = {discovery: '発見', subscribed: '登録チャンネル', people: '似た好みの人', settings: '設定'}[tab];
-  const descriptions = {
-    discovery: '高評価や共通のコメントから見つけた動画',
-    subscribed: '登録しているチャンネルの新着動画',
-    people: '同じ動画にコメントした人をたどる'
-  };
-  let body;
-  if (tab === 'settings') body = settings();
-  else if (tab === 'people') body = person ? timeline(person, state.timelineVideos, actions, () => selectTab('people'), guarded(uploads)) :
-    peopleView(state.people, selected => { person = selected; render(); window.scrollTo(0, 0); });
-  else body = feed(getFeed(tab), actions, state.refresh.last ? undefined : '「更新」を押して動画を取得してください。');
-  const navbar = h('nav', {class: 'tabs', 'aria-label': 'メインメニュー'}, h('div', {class: 'tabs-inner'}, tabs.map(([key, name, symbol]) => {
-    const item = button([icon(symbol), h('span', {}, name)], () => selectTab(key), 'tab');
-    if (key === tab) item.setAttribute('aria-current', 'page');
-    return item;
-  })));
-  root.replaceChildren(header, h('main', {class: 'shell'}, progress,
-    h('div', {class: 'page-head'}, h('div', {}, h('h1', {}, heading), descriptions[tab] && h('p', {}, descriptions[tab])),
-      ['discovery', 'subscribed'].includes(tab) && button([icon('tv'), ' TV モード'], () => play(), 'button primary tv-button')),
-    body), navbar);
-  paintProgress();
+  const pages = Math.ceil(filtered.length / pageSize);
+  page = Math.max(0, Math.min(page, pages - 1));
+  const start = page * pageSize;
+  observer?.disconnect();
+  get('cards').replaceChildren(...filtered.slice(start, start + pageSize).map((video, i) => card(video, start + i)));
+  get('cards').setAttribute('aria-busy', 'false');
+  get('status').textContent = filtered.length ? filtered.length.toLocaleString('ja-JP') + '件' :
+    catalog.length ? '条件に合う動画がありません。' : '集計された動画はまだありません。';
+  get('pages').hidden = pages < 2;
+  get('pageNumber').textContent = (page + 1) + ' / ' + pages;
+  get('prevPage').disabled = page === 0;
+  get('nextPage').disabled = page >= pages - 1;
+  get('tv').disabled = !filtered.length;
 }
 
-render();
-if (token()) guarded(async () => { await loadState(); if (!demo) render(); })();
-if (GOOGLE_CLIENT_ID) prepareSignIn().catch(() => {});
-if (GOOGLE_CLIENT_ID) {
-  let hadToken = Boolean(token());
-  const checkSession = () => {
-    const signedIn = Boolean(token());
-    if (running || busy) return;
-    if (hadToken && !signedIn && !demo) {
-      render();
-      message('セッションが切れました。Google で再ログインしてください。');
-    }
-    hadToken = signedIn;
-  };
-  setInterval(checkSession, 5000);
-  document.addEventListener('visibilitychange', checkSession);
+async function refresh(reset = true) {
+  const request = ++generation;
+  if (reset) page = 0;
+  get('shuffle').hidden = controls.sort !== 'random';
+  get('channel').hidden = !controls.channel;
+  if (!loaded) return;
+  const channel = catalog.find(video => channelKey(video) === controls.channel);
+  get('channel').textContent = (channel?.c || 'チャンネル') + ' ×';
+  const readComments = video => video.k ?? loadedShards.get(commentShard(video.id))?.[video.id] ?? [];
+  const query = controls.query.trim();
+  const candidates = query ? filterVideos(catalog, {...controls, query: '', sort: 'count'}, sets, seed) : catalog;
+  const keys = query ? [...new Set(candidates.filter(video => video.s).map(video => commentShard(video.id)))]
+    .filter(key => !loadedShards.has(key)) : [];
+  if (keys.length) {
+    get('status').textContent = 'コメントを検索中…';
+    let failed = false;
+    let cursor = 0;
+    await Promise.all(Array.from({length: Math.min(keys.length, 6)}, async () => {
+      while (request === generation && cursor < keys.length) {
+        try { await getShard(keys[cursor++]); } catch { failed = true; }
+      }
+    }));
+    if (request !== generation) return;
+    filtered = filterVideos(candidates, controls, sets, seed, {comments: readComments});
+    render();
+    if (failed) get('status').append(' · 一部のコメントを読み込めませんでした。');
+    return;
+  }
+  filtered = filterVideos(candidates, controls, sets, seed, {comments: readComments});
+  render();
 }
-if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('./sw.js').catch(() => {});
+
+async function load() {
+  get('retry').hidden = true;
+  get('status').textContent = '動画を読み込み中…';
+  get('cards').setAttribute('aria-busy', 'true');
+  if (!get('cards').children.length) get('cards').append(...Array.from({length: 3}, () => h('div', {class: 'skeleton', 'aria-hidden': 'true'})));
+  try {
+    const meta = await fetchJson('meta.json');
+    const updated = meta.generatedAt ? new Date(meta.generatedAt).toLocaleString('ja-JP', {dateStyle: 'medium', timeStyle: 'short'}) : '集計前';
+    get('meta').textContent = '更新 ' + updated + ' · 全' + meta.count.toLocaleString('ja-JP') + '件';
+    catalog = await fetchJson('videos.json');
+    if (!Array.isArray(catalog)) throw new Error('Invalid catalog');
+    loaded = true;
+    await refresh();
+  } catch {
+    get('cards').replaceChildren();
+    get('cards').setAttribute('aria-busy', 'false');
+    get('status').textContent = '動画を読み込めませんでした。時間をおいて再読み込みしてください。';
+    get('retry').hidden = false;
+  }
+}
+
+const years = h('optgroup', {label: '年ごと'});
+for (let year = new Date().getFullYear(); year >= 2009; year--) years.append(h('option', {value: year}, year + '年'));
+get('period').append(years);
+for (const key of ['sort', 'period', 'min', 'query', 'showWatched']) {
+  const input = get(key);
+  if (key === 'showWatched') input.checked = controls[key];
+  else input.value = controls[key];
+  input.addEventListener(key === 'query' ? 'input' : 'change', () => {
+    controls[key] = key === 'showWatched' ? input.checked : key === 'min' ? Number(input.value) : input.value;
+    store(controlKey, controls);
+    clearTimeout(searchDelay);
+    if (key === 'query') {
+      generation++;
+      searchDelay = setTimeout(refresh, 220);
+    } else refresh();
+  });
+}
+get('channel').onclick = () => setChannel('');
+get('tv').onclick = () => play(filtered, true);
+get('settings').onclick = () => openSettings(sets, value => { sets = value; saveSets(); });
+get('shuffle').onclick = () => {
+  seed = newSeed();
+  store('hatebu-video-seed', seed, 'sessionStorage');
+  refresh();
+};
+for (const [id, offset] of [['prevPage', -1], ['nextPage', 1]]) {
+  get(id).onclick = () => {
+    page += offset;
+    render();
+    get('status').focus({preventScroll: true});
+    window.scrollTo(0, 0);
+  };
+}
+get('retry').onclick = load;
+load();
+navigator.serviceWorker?.register('./sw.js').catch(() => {});

@@ -1,10 +1,10 @@
-const cacheName = 'serendipity-shell-v1';
+const cacheName = 'serendipity-shell-v2';
 const shell = [
   './', './index.html', './style.css', './manifest.webmanifest', './icon.svg', './icon-192.png', './icon-512.png',
-  './app.js', './auth.js', './api.js', './config.js', './db.js', './demo.js', './player.js', './rank.js', './refresh.js',
-  './ui/dom.js', './ui/feed.js', './ui/people.js', './ui/settings.js', './ui/setup.js'
+  './app.js', './player.js', './js/catalog.js', './js/dom.js', './js/settings.js', './js/video.js'
 ];
 const paths = new Set(shell.map(path => new URL(path, self.registration.scope).href));
+
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(cacheName).then(cache => cache.addAll(shell)).then(() => self.skipWaiting()));
 });
@@ -16,7 +16,12 @@ self.addEventListener('fetch', event => {
   const request = event.request;
   const url = new URL(request.url);
   url.search = '';
-  if (request.method !== 'GET' || !paths.has(url.href)) return;
+  if (request.method !== 'GET') return;
+  if (url.href.startsWith(new URL('./data/', self.registration.scope).href)) {
+    event.respondWith(fetch(request, {cache: 'no-cache'}));
+    return;
+  }
+  if (!paths.has(url.href)) return;
   event.respondWith(fetch(request).then(async response => {
     if (response.ok) await (await caches.open(cacheName)).put(url.href, response.clone());
     return response;
